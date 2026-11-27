@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>My Block Game</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      background: #87CEEB; /* sky blue */
+    }
+
+    h1 {
+      margin: 10px;
+    }
+
+    /* The buttons for picking your character */
+    .emoji-button {
+      font-size: 30px;
+      padding: 5px 10px;
+      margin: 3px;
+      cursor: pointer;
+      border: 2px solid gray;
+      border-radius: 8px;
+      background: white;
+    }
+
+    .emoji-button.picked {
+      border: 3px solid orange;
+      background: #FFF3C4;
+    }
+
+    /* The game world */
+    canvas {
+      background: white;
+      border: 3px solid #333;
+      margin-top: 10px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>My Block Game</h1>
+
+  <div>
+    Pick your character:
+    <button class="emoji-button picked">🙂</button>
+    <button class="emoji-button">🐱</button>
+    <button class="emoji-button">🤖</button>
+    <button class="emoji-button">🦄</button>
+    <button class="emoji-button">🧟</button>
+    <button class="emoji-button">🐸</button>
+  </div>
+
+  <p>Move with the arrow keys. Click to add a block. Click a block to delete it.</p>
+
+  <canvas id="game" width="600" height="400"></canvas>
+
+  <script>
+    // ----- SETTINGS -----
+    const SIZE = 40;              // each square is 40 pixels big
+    const COLS = 15;              // how many squares across
+    const ROWS = 10;              // how many squares down
+
+    // ----- THE PLAYER -----
+    let player = {
+      x: 7,                       // which column the player is in
+      y: 5,                       // which row the player is in
+      emoji: "🙂"                 // what the player looks like
+    };
+
+    // ----- THE BLOCKS -----
+    // We remember blocks by their spot, like "3,4"
+    let blocks = new Set();
+
+    // ----- DRAWING -----
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    function draw() {
+      // wipe the screen clean
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // draw the grid lines
+      ctx.strokeStyle = "#ddd";
+      for (let col = 0; col <= COLS; col++) {
+        ctx.beginPath();
+        ctx.moveTo(col * SIZE, 0);
+        ctx.lineTo(col * SIZE, ROWS * SIZE);
+        ctx.stroke();
+      }
+      for (let row = 0; row <= ROWS; row++) {
+        ctx.beginPath();
+        ctx.moveTo(0, row * SIZE);
+        ctx.lineTo(COLS * SIZE, row * SIZE);
+        ctx.stroke();
+      }
+
+      // draw every block
+      for (let spot of blocks) {
+        let [x, y] = spot.split(",").map(Number);
+        ctx.fillStyle = "#8B5A2B";  // brown, like dirt
+        ctx.fillRect(x * SIZE + 1, y * SIZE + 1, SIZE - 2, SIZE - 2);
+      }
+
+      // draw the player
+      ctx.font = "32px serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(player.emoji, player.x * SIZE + SIZE / 2, player.y * SIZE + SIZE / 2);
+    }
+
+    // ----- MOVING -----
+    document.addEventListener("keydown", function (event) {
+      let newX = player.x;
+      let newY = player.y;
+
+      if (event.key === "ArrowUp")    newY = newY - 1;
+      if (event.key === "ArrowDown")  newY = newY + 1;
+      if (event.key === "ArrowLeft")  newX = newX - 1;
+      if (event.key === "ArrowRight") newX = newX + 1;
+
+      // don't walk off the edge of the world
+      if (newX < 0 || newX >= COLS || newY < 0 || newY >= ROWS) return;
+
+      // don't walk through blocks!
+      if (blocks.has(newX + "," + newY)) return;
+
+      player.x = newX;
+      player.y = newY;
+      draw();
+    });
+
+    // ----- CLICKING -----
+    canvas.addEventListener("click", function (event) {
+      // figure out which square was clicked
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.floor((event.clientX - rect.left) / SIZE);
+      const y = Math.floor((event.clientY - rect.top) / SIZE);
+      const spot = x + "," + y;
+
+      // can't put a block on top of the player
+      if (x === player.x && y === player.y) return;
+
+      if (blocks.has(spot)) {
+        blocks.delete(spot);      // clicked a block? delete it
+      } else {
+        blocks.add(spot);         // clicked empty space? add a block
+      }
+      draw();
+    });
+
+    // ----- PICKING YOUR CHARACTER -----
+    for (let button of document.querySelectorAll(".emoji-button")) {
+      button.addEventListener("click", function () {
+        // un-pick the old button, pick this one
+        document.querySelector(".picked").classList.remove("picked");
+        button.classList.add("picked");
+
+        player.emoji = button.textContent;
+        draw();
+      });
+    }
+
+    // draw the world for the first time
+    draw();
+  </script>
+
+</body>
+</html>
