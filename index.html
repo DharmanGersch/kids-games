@@ -18,6 +18,45 @@
       padding: 5px;
     }
 
+    .save-controls {
+      margin-top: 6px;
+      display: inline-flex;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 6px;
+      font-size: 14px;
+    }
+
+    .save-controls input {
+      width: 120px;
+      padding: 4px 6px;
+      border: 1px solid #999;
+      border-radius: 6px;
+    }
+
+    .save-controls button {
+      padding: 4px 8px;
+      border: 1px solid #777;
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+    }
+
+    #save-status {
+      min-width: 140px;
+      text-align: left;
+      color: #333;
+      font-size: 12px;
+    }
+
+    #autosave-time {
+      min-width: 140px;
+      text-align: left;
+      color: #333;
+      font-size: 12px;
+    }
+
     /* The buttons for picking your character */
     .emoji-button {
       font-size: 24px;
@@ -72,6 +111,20 @@
     <button class="emoji-button">🌟</button>
     &nbsp; Blocks:
     <span id="hotbar"></span>
+    <div class="save-controls">
+      Slots:
+      <select id="slot-list" aria-label="Saved slots"></select>
+      Save slot:
+      <input id="save-slot" type="text" value="main" maxlength="30" aria-label="Save slot name">
+      <button id="save-btn" type="button">Save</button>
+      <button id="load-btn" type="button">Load</button>
+      <button id="clear-btn" type="button">Clear Slot</button>
+      <button id="export-btn" type="button">Export JSON</button>
+      <button id="import-btn" type="button">Import JSON</button>
+      <input id="import-file" type="file" accept="application/json" style="display:none">
+      <span id="save-status"></span>
+      <span id="autosave-time">Last auto-save: never</span>
+    </div>
   </div>
 
   <canvas id="game"></canvas>
@@ -106,8 +159,17 @@
     };
 
     // ----- THE BLOCKS -----
-    // We remember each block by its spot, like "3,4", and its color
+    // We remember each block by its spot, like "3,4", and block type index
     let blocks = new Map();
+
+    const SAVE_VERSION = 2;
+    const STORAGE_PREFIX = "my-block-game-save:";
+    const slotList = document.getElementById("slot-list");
+    const saveSlotInput = document.getElementById("save-slot");
+    const saveStatus = document.getElementById("save-status");
+    const autoSaveTime = document.getElementById("autosave-time");
+    const importFileInput = document.getElementById("import-file");
+    let lastAutoSaveMs = null;
 
     // ----- DRAWING -----
     const canvas = document.getElementById("game");
@@ -133,9 +195,11 @@
       }
 
       // draw every block in its own color
-      for (let [spot, color] of blocks) {
+      for (let [spot, blockType] of blocks) {
         let [x, y] = spot.split(",").map(Number);
-        ctx.fillStyle = color;
+        const type = BLOCK_TYPES[blockType];
+        if (!type) continue;
+        ctx.fillStyle = type.color;
         ctx.fillRect(x * SIZE + 1, y * SIZE + 1, SIZE - 2, SIZE - 2);
         ctx.strokeStyle = "rgba(0, 0, 0, 0.3)";   // thin outline so snow shows up
         ctx.strokeRect(x * SIZE + 1, y * SIZE + 1, SIZE - 2, SIZE - 2);
@@ -169,8 +233,248 @@
       if (blocks.has(spot)) {
         blocks.delete(spot);      // already a block there? break it
       } else {
-        blocks.set(spot, BLOCK_TYPES[currentBlock].color);
+        blocks.set(spot, currentBlock);
       }
+      autoSaveToCurrentSlot();
+    }
+
+    function currentSlotName() {
+      return (saveSlotInput.value || "main").trim() || "main";
+    }
+
+    function storageKeyForSlot(slot) {
+      return STORAGE_PREFIX + slot;
+    }
+
+    function slotsFromStorage() {
+      const slots = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key || !key.startsWith(STORAGE_PREFIX)) continue;
+        const slot = key.slice(STORAGE_PREFIX.length);
+        if (slot) slots.push(slot);
+      }
+      slots.sort();
+      return slots;
+    }
+
+    function refreshSlotList() {
+      const current = currentSlotName();
+      const slots = slotsFromStorage();
+      if (!slots.includes(current)) slots.unshift(current);
+
+      slotList.innerHTML = "";
+      for (const slot of slots) {
+        const option = document.createElement("option");
+        option.value = slot;
+        option.textContent = slot;
+        slotList.appendChild(option);
+      }
+      slotList.value = current;
+    }
+
+    function setStatus(message) {
+      saveStatus.textContent = message;
+    }
+
+    function formatElapsed(ms) {
+      const seconds = Math.max(0, Math.floor(ms / 1000));
+      if (seconds < 60) return seconds + "s ago";
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return minutes + "m ago";
+      const hours = Math.floor(minutes / 60);
+      return hours + "h ago";
+    }
+
+    function updateAutoSaveLabel() {
+      if (lastAutoSaveMs === null) {
+        autoSaveTime.textContent = "Last auto-save: never";
+        return;
+      }
+      autoSaveTime.textContent = "Last auto-save: " + formatElapsed(Date.now() - lastAutoSaveMs);
+    }
+
+    function markAutoSaveTime(savedAtIso) {
+      const stamp = savedAtIso ? Date.parse(savedAtIso) : Date.now();
+      lastAutoSaveMs = Number.isNaN(stamp) ? Date.now() : stamp;
+      updateAutoSaveLabel();
+    }
+
+    function serializeGameState() {
+      return {
+        version: SAVE_VERSION,
+        savedAt: new Date().toISOString(),
+        currentBlock,
+        player: {
+          x: player.x,
+          y: player.y,
+          emoji: player.emoji
+        },
+        blocks: Array.from(blocks.entries()).map(function ([spot, type]) {
+          const [x, y] = spot.split(",").map(Number);
+          return { x, y, type };
+        })
+      };
+    }
+
+    function colorToTypeIndex(color) {
+      const normalized = String(color || "").toLowerCase();
+      for (let i = 0; i < BLOCK_TYPES.length; i++) {
+        if (BLOCK_TYPES[i].color.toLowerCase() === normalized) return i;
+      }
+      return 0;
+    }
+
+    function migrateSaveData(data) {
+      if (!data || typeof data !== "object") {
+        throw new Error("Save file format is invalid.");
+      }
+
+      let next = data;
+      let version = Number.isInteger(next.version) ? next.version : 0;
+
+      if (version === 0) {
+        const migratedBlocks = [];
+        if (Array.isArray(next.blocks)) {
+          for (const item of next.blocks) {
+            if (!item) continue;
+            const x = Number(item.x);
+            const y = Number(item.y);
+            const type = Number(item.type);
+            if (Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(type)) {
+              migratedBlocks.push({ x, y, type });
+            }
+          }
+        } else if (next.blocks && typeof next.blocks === "object") {
+          for (const [spot, color] of Object.entries(next.blocks)) {
+            const parts = spot.split(",");
+            if (parts.length !== 2) continue;
+            const x = Number(parts[0]);
+            const y = Number(parts[1]);
+            if (!Number.isInteger(x) || !Number.isInteger(y)) continue;
+            migratedBlocks.push({ x, y, type: colorToTypeIndex(color) });
+          }
+        }
+
+        next = {
+          version: 1,
+          savedAt: next.savedAt || new Date().toISOString(),
+          currentBlock: Number.isInteger(next.currentBlock) ? next.currentBlock : 0,
+          player: {
+            x: next.player && Number.isInteger(next.player.x) ? next.player.x : 0,
+            y: next.player && Number.isInteger(next.player.y) ? next.player.y : 0,
+            emoji: next.player && next.player.emoji ? String(next.player.emoji) : "🙂"
+          },
+          blocks: migratedBlocks
+        };
+        version = 1;
+      }
+
+      if (version === 1) {
+        next = {
+          version: 2,
+          savedAt: next.savedAt || new Date().toISOString(),
+          currentBlock: next.currentBlock,
+          player: next.player,
+          blocks: next.blocks,
+          meta: {
+            migratedFrom: 1,
+            migratedAt: new Date().toISOString()
+          }
+        };
+        version = 2;
+      }
+
+      if (version > SAVE_VERSION) {
+        throw new Error("Save file was created by a newer game version.");
+      }
+
+      return next;
+    }
+
+    function applyGameState(data) {
+      const safeData = migrateSaveData(data);
+
+      if (!safeData || !safeData.player || !Array.isArray(safeData.blocks)) {
+        throw new Error("Save file format is invalid.");
+      }
+
+      blocks = new Map();
+      for (const item of safeData.blocks) {
+        if (!item) continue;
+        const x = Number(item.x);
+        const y = Number(item.y);
+        const type = Number(item.type);
+        if (!Number.isInteger(x) || !Number.isInteger(y)) continue;
+        if (!Number.isInteger(type) || type < 0 || type >= BLOCK_TYPES.length) continue;
+        if (x < 0 || x >= COLS || y < 0 || y >= ROWS) continue;
+        blocks.set(x + "," + y, type);
+      }
+
+      player.x = Math.max(0, Math.min(COLS - 1, Number(safeData.player.x) || 0));
+      player.y = Math.max(0, Math.min(ROWS - 1, Number(safeData.player.y) || 0));
+      player.emoji = String(safeData.player.emoji || "🙂");
+
+      const nextBlock = Number(safeData.currentBlock);
+      pickBlock(Number.isInteger(nextBlock) && nextBlock >= 0 && nextBlock < BLOCK_TYPES.length ? nextBlock : 0);
+      updateCharacterButtons();
+      markAutoSaveTime(safeData.savedAt);
+      draw();
+    }
+
+    function saveToSlot(slot, options = {}) {
+      const state = serializeGameState();
+      localStorage.setItem(storageKeyForSlot(slot), JSON.stringify(state));
+      if (!options.silent) setStatus("Saved to slot: " + slot);
+      if (options.auto) markAutoSaveTime(state.savedAt);
+      refreshSlotList();
+    }
+
+    function loadFromSlot(slot) {
+      const raw = localStorage.getItem(storageKeyForSlot(slot));
+      if (!raw) {
+        setStatus("No save in slot: " + slot);
+        return false;
+      }
+      applyGameState(JSON.parse(raw));
+      setStatus("Loaded slot: " + slot);
+      return true;
+    }
+
+    function clearSlot(slot) {
+      localStorage.removeItem(storageKeyForSlot(slot));
+      setStatus("Cleared slot: " + slot);
+      refreshSlotList();
+    }
+
+    function autoSaveToCurrentSlot() {
+      try {
+        saveToSlot(currentSlotName(), { silent: true, auto: true });
+      } catch (error) {
+        setStatus("Auto-save failed");
+      }
+    }
+
+    function exportSaveAsJson() {
+      const slot = currentSlotName();
+      const json = JSON.stringify(serializeGameState(), null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "block-game-save-" + slot + ".json";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setStatus("Exported JSON for: " + slot);
+    }
+
+    function importSaveFromJsonText(text) {
+      const parsed = JSON.parse(text);
+      applyGameState(parsed);
+      saveToSlot(currentSlotName(), { auto: true });
+      setStatus("Imported JSON and saved.");
     }
 
     // ----- KEYBOARD -----
@@ -212,6 +516,7 @@
         if (blocks.has(spot)) return;
         player.x = newX;
         player.y = newY;
+        autoSaveToCurrentSlot();
       }
       draw();
     });
@@ -239,12 +544,21 @@
     for (let button of document.querySelectorAll(".emoji-button")) {
       button.addEventListener("click", function () {
         // un-pick the old button, pick this one
-        document.querySelector(".emoji-button.picked").classList.remove("picked");
-        button.classList.add("picked");
-
         player.emoji = button.textContent;
+        updateCharacterButtons();
+        autoSaveToCurrentSlot();
         draw();
       });
+    }
+
+    function updateCharacterButtons() {
+      for (let button of document.querySelectorAll(".emoji-button")) {
+        if (button.textContent === player.emoji) {
+          button.classList.add("picked");
+        } else {
+          button.classList.remove("picked");
+        }
+      }
     }
 
     // ----- PICKING A BLOCK TYPE -----
@@ -272,9 +586,75 @@
       }
     }
 
+    document.getElementById("save-btn").addEventListener("click", function () {
+      try {
+        saveToSlot(currentSlotName());
+      } catch (error) {
+        setStatus("Save failed");
+      }
+    });
+
+    document.getElementById("load-btn").addEventListener("click", function () {
+      try {
+        loadFromSlot(currentSlotName());
+      } catch (error) {
+        setStatus("Load failed");
+      }
+    });
+
+    document.getElementById("clear-btn").addEventListener("click", function () {
+      clearSlot(currentSlotName());
+    });
+
+    document.getElementById("export-btn").addEventListener("click", function () {
+      try {
+        exportSaveAsJson();
+      } catch (error) {
+        setStatus("Export failed");
+      }
+    });
+
+    document.getElementById("import-btn").addEventListener("click", function () {
+      importFileInput.click();
+    });
+
+    importFileInput.addEventListener("change", function (event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function () {
+        try {
+          importSaveFromJsonText(String(reader.result || ""));
+        } catch (error) {
+          setStatus("Import failed");
+        }
+      };
+      reader.readAsText(file);
+      importFileInput.value = "";
+    });
+
+    saveSlotInput.addEventListener("change", function () {
+      refreshSlotList();
+      setStatus("Slot set to: " + currentSlotName());
+    });
+
+    slotList.addEventListener("change", function () {
+      if (!slotList.value) return;
+      saveSlotInput.value = slotList.value;
+      setStatus("Slot set to: " + currentSlotName());
+    });
+
+    window.addEventListener("beforeunload", function () {
+      autoSaveToCurrentSlot();
+    });
+
     // get everything ready!
     pickBlock(0);
+    refreshSlotList();
     fillWindow();
+    loadFromSlot(currentSlotName());
+    updateAutoSaveLabel();
+    setInterval(updateAutoSaveLabel, 1000);
   </script>
 
 </body>
