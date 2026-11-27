@@ -4,64 +4,99 @@
   <meta charset="UTF-8">
   <title>My Block Game</title>
   <style>
-    body {
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;    /* no scrollbars - the game fills the window */
       font-family: sans-serif;
-      text-align: center;
       background: #87CEEB; /* sky blue */
     }
 
-    h1 {
-      margin: 10px;
+    /* The bar across the top of the screen */
+    #top-bar {
+      text-align: center;
+      padding: 5px;
     }
 
     /* The buttons for picking your character */
     .emoji-button {
-      font-size: 30px;
-      padding: 5px 10px;
-      margin: 3px;
+      font-size: 24px;
+      padding: 2px 8px;
+      margin: 2px;
       cursor: pointer;
       border: 2px solid gray;
       border-radius: 8px;
       background: white;
     }
 
-    .emoji-button.picked {
+    /* The buttons for picking a block type */
+    .block-button {
+      width: 36px;
+      height: 36px;
+      margin: 2px;
+      cursor: pointer;
+      border: 2px solid gray;
+      border-radius: 8px;
+      color: white;
+      font-weight: bold;
+      text-shadow: 0 0 3px black;
+    }
+
+    /* The button you picked glows orange */
+    .picked {
       border: 3px solid orange;
-      background: #FFF3C4;
+      box-shadow: 0 0 6px orange;
     }
 
     /* The game world */
     canvas {
+      display: block;
       background: white;
-      border: 3px solid #333;
-      margin-top: 10px;
       cursor: pointer;
     }
   </style>
 </head>
 <body>
 
-  <h1>My Block Game</h1>
-
-  <div>
-    Pick your character:
+  <div id="top-bar">
+    <b>My Block Game</b> &mdash;
+    arrows = walk &nbsp;|&nbsp; B + arrow = build or break &nbsp;|&nbsp; 1 to 0 = pick a block &nbsp;|&nbsp; click works too
+    <br>
+    Character:
     <button class="emoji-button picked">🙂</button>
     <button class="emoji-button">🐱</button>
     <button class="emoji-button">🤖</button>
     <button class="emoji-button">🦄</button>
     <button class="emoji-button">🧟</button>
     <button class="emoji-button">🐸</button>
+    <button class="emoji-button">🌟</button>
+    &nbsp; Blocks:
+    <span id="hotbar"></span>
   </div>
 
-  <p>Move with the arrow keys. Click to add a block. Click a block to delete it.</p>
-
-  <canvas id="game" width="600" height="400"></canvas>
+  <canvas id="game"></canvas>
 
   <script>
     // ----- SETTINGS -----
     const SIZE = 40;              // each square is 40 pixels big
-    const COLS = 15;              // how many squares across
-    const ROWS = 10;              // how many squares down
+    let COLS = 0;                 // how many squares across (set when we measure the window)
+    let ROWS = 0;                 // how many squares down
+
+    // ----- THE BLOCK TYPES -----
+    // Press keys 1 to 0 (or click a button) to pick one
+    const BLOCK_TYPES = [
+      { name: "Dirt",  color: "#8B5A2B" },
+      { name: "Grass", color: "#4CAF50" },
+      { name: "Stone", color: "#9E9E9E" },
+      { name: "Wood",  color: "#DEB887" },
+      { name: "Sand",  color: "#F0E68C" },
+      { name: "Water", color: "#4FC3F7" },
+      { name: "Lava",  color: "#FF5722" },
+      { name: "Rose",  color: "#E91E63" },
+      { name: "Snow",  color: "#FFFFFF" },
+      { name: "Coal",  color: "#37474F" }
+    ];
+    let currentBlock = 0;         // which block type is picked (starts on Dirt)
 
     // ----- THE PLAYER -----
     let player = {
@@ -71,8 +106,8 @@
     };
 
     // ----- THE BLOCKS -----
-    // We remember blocks by their spot, like "3,4"
-    let blocks = new Set();
+    // We remember each block by its spot, like "3,4", and its color
+    let blocks = new Map();
 
     // ----- DRAWING -----
     const canvas = document.getElementById("game");
@@ -97,11 +132,13 @@
         ctx.stroke();
       }
 
-      // draw every block
-      for (let spot of blocks) {
+      // draw every block in its own color
+      for (let [spot, color] of blocks) {
         let [x, y] = spot.split(",").map(Number);
-        ctx.fillStyle = "#8B5A2B";  // brown, like dirt
+        ctx.fillStyle = color;
         ctx.fillRect(x * SIZE + 1, y * SIZE + 1, SIZE - 2, SIZE - 2);
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.3)";   // thin outline so snow shows up
+        ctx.strokeRect(x * SIZE + 1, y * SIZE + 1, SIZE - 2, SIZE - 2);
       }
 
       // draw the player
@@ -111,25 +148,76 @@
       ctx.fillText(player.emoji, player.x * SIZE + SIZE / 2, player.y * SIZE + SIZE / 2);
     }
 
-    // ----- MOVING -----
+    // ----- FILLING THE WHOLE WINDOW -----
+    function fillWindow() {
+      const topBar = document.getElementById("top-bar");
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight - topBar.offsetHeight;
+      COLS = Math.floor(canvas.width / SIZE);
+      ROWS = Math.floor(canvas.height / SIZE);
+
+      // if the window shrank, keep the player inside the world
+      if (player.x >= COLS) player.x = COLS - 1;
+      if (player.y >= ROWS) player.y = ROWS - 1;
+
+      draw();
+    }
+    window.addEventListener("resize", fillWindow);
+
+    // ----- BUILDING OR BREAKING ONE SPOT -----
+    function buildOrBreak(spot) {
+      if (blocks.has(spot)) {
+        blocks.delete(spot);      // already a block there? break it
+      } else {
+        blocks.set(spot, BLOCK_TYPES[currentBlock].color);
+      }
+    }
+
+    // ----- KEYBOARD -----
+    let bHeld = false;            // is the B key held down right now?
+
     document.addEventListener("keydown", function (event) {
-      let newX = player.x;
-      let newY = player.y;
+      const key = event.key;
 
-      if (event.key === "ArrowUp")    newY = newY - 1;
-      if (event.key === "ArrowDown")  newY = newY + 1;
-      if (event.key === "ArrowLeft")  newX = newX - 1;
-      if (event.key === "ArrowRight") newX = newX + 1;
+      if (key === "b" || key === "B") bHeld = true;
 
-      // don't walk off the edge of the world
+      // number keys 1-9 and 0 pick a block type
+      const numbers = "1234567890";
+      if (numbers.includes(key)) pickBlock(numbers.indexOf(key));
+
+      // which way is the arrow pointing?
+      let dx = 0;
+      let dy = 0;
+      if (key === "ArrowUp")    dy = -1;
+      if (key === "ArrowDown")  dy = 1;
+      if (key === "ArrowLeft")  dx = -1;
+      if (key === "ArrowRight") dx = 1;
+      if (dx === 0 && dy === 0) return;   // not an arrow key
+
+      event.preventDefault();             // stop the page from scrolling
+
+      const newX = player.x + dx;
+      const newY = player.y + dy;
+
+      // stay inside the world
       if (newX < 0 || newX >= COLS || newY < 0 || newY >= ROWS) return;
 
-      // don't walk through blocks!
-      if (blocks.has(newX + "," + newY)) return;
+      const spot = newX + "," + newY;
 
-      player.x = newX;
-      player.y = newY;
+      if (bHeld) {
+        // B + arrow: build (or break) the block next to the player
+        buildOrBreak(spot);
+      } else {
+        // just an arrow: walk (but not through blocks!)
+        if (blocks.has(spot)) return;
+        player.x = newX;
+        player.y = newY;
+      }
       draw();
+    });
+
+    document.addEventListener("keyup", function (event) {
+      if (event.key === "b" || event.key === "B") bHeld = false;
     });
 
     // ----- CLICKING -----
@@ -138,16 +226,12 @@
       const rect = canvas.getBoundingClientRect();
       const x = Math.floor((event.clientX - rect.left) / SIZE);
       const y = Math.floor((event.clientY - rect.top) / SIZE);
-      const spot = x + "," + y;
 
-      // can't put a block on top of the player
+      // ignore clicks outside the world or on the player
+      if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return;
       if (x === player.x && y === player.y) return;
 
-      if (blocks.has(spot)) {
-        blocks.delete(spot);      // clicked a block? delete it
-      } else {
-        blocks.add(spot);         // clicked empty space? add a block
-      }
+      buildOrBreak(x + "," + y);
       draw();
     });
 
@@ -155,7 +239,7 @@
     for (let button of document.querySelectorAll(".emoji-button")) {
       button.addEventListener("click", function () {
         // un-pick the old button, pick this one
-        document.querySelector(".picked").classList.remove("picked");
+        document.querySelector(".emoji-button.picked").classList.remove("picked");
         button.classList.add("picked");
 
         player.emoji = button.textContent;
@@ -163,8 +247,34 @@
       });
     }
 
-    // draw the world for the first time
-    draw();
+    // ----- PICKING A BLOCK TYPE -----
+    // make one button for each block type
+    const hotbar = document.getElementById("hotbar");
+    for (let i = 0; i < BLOCK_TYPES.length; i++) {
+      const button = document.createElement("button");
+      button.className = "block-button";
+      button.style.background = BLOCK_TYPES[i].color;
+      button.textContent = (i + 1) % 10;   // show the key: 1, 2, ... 9, 0
+      button.title = BLOCK_TYPES[i].name;
+      button.addEventListener("click", function () { pickBlock(i); });
+      hotbar.appendChild(button);
+    }
+
+    function pickBlock(i) {
+      currentBlock = i;
+      const buttons = document.querySelectorAll(".block-button");
+      for (let j = 0; j < buttons.length; j++) {
+        if (j === i) {
+          buttons[j].classList.add("picked");
+        } else {
+          buttons[j].classList.remove("picked");
+        }
+      }
+    }
+
+    // get everything ready!
+    pickBlock(0);
+    fillWindow();
   </script>
 
 </body>
