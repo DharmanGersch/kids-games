@@ -1,1 +1,3 @@
-# pk-m-first-code
+# kids-games
+
+developed by kids with copilot
