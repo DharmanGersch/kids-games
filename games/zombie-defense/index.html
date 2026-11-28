@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Zombie Defense</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;    /* no scrollbars - the game fills the window */
+      font-family: sans-serif;
+      background: #87CEEB; /* sky blue */
+    }
+
+    /* The bar across the top of the screen */
+    #top-bar {
+      text-align: center;
+      padding: 5px;
+    }
+
+    /* The row that shows lives, the clock and messages */
+    #hud {
+      font-size: 18px;
+      margin-top: 4px;
+    }
+
+    #message {
+      font-weight: bold;
+      color: #B00020;
+    }
+
+    /* The buttons for picking your character */
+    .emoji-button {
+      font-size: 24px;
+      padding: 2px 8px;
+      margin: 2px;
+      cursor: pointer;
+      border: 2px solid gray;
+      border-radius: 8px;
+      background: white;
+    }
+
+    /* The buttons for picking a block type */
+    .block-button {
+      width: 36px;
+      height: 36px;
+      margin: 2px;
+      cursor: pointer;
+      border: 2px solid gray;
+      border-radius: 8px;
+      color: white;
+      font-weight: bold;
+      text-shadow: 0 0 3px black;
+    }
+
+    /* The button you picked glows orange */
+    .picked {
+      border: 3px solid orange;
+      box-shadow: 0 0 6px orange;
+    }
+
+    #restart-btn {
+      display: none;      /* hidden until the game ends */
+      font-size: 18px;
+      padding: 4px 14px;
+      margin-left: 10px;
+      cursor: pointer;
+      border: 2px solid #B00020;
+      border-radius: 8px;
+      background: #FFD54F;
+      font-weight: bold;
+    }
+
+    /* The game world */
+    canvas {
+      display: block;
+      background: white;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="top-bar">
+    <b>Zombie Defense</b> &mdash;
+    arrows = walk &nbsp;|&nbsp; B + arrow = build or break &nbsp;|&nbsp; 1 to 0 = pick a block
+    <br>
+    Character:
+    <button class="emoji-button picked">🙂</button>
+    <button class="emoji-button">🐱</button>
+    <button class="emoji-button">🤖</button>
+    <button class="emoji-button">🦄</button>
+    <button class="emoji-button">🐸</button>
+    <button class="emoji-button">🌟</button>
+    &nbsp; Blocks:
+    <span id="hotbar"></span>
+    <div id="hud">
+      Lives: <span id="lives"></span> &nbsp;|&nbsp;
+      Time left: <span id="clock">5:00</span> &nbsp;|&nbsp;
+      Zombies: <span id="zombie-count">0</span>
+      <span id="message"></span>
+      <button id="restart-btn">Play again!</button>
+    </div>
+  </div>
+
+  <canvas id="game"></canvas>
+
+  <script>
+    // ----- SETTINGS -----
+    const SIZE = 40;              // each square is 40 pixels big
+    const START_LIVES = 5;        // how many lives you start with
+    const GAME_SECONDS = 5 * 60;  // survive this long to win (5 minutes)
+    const FIRST_SPAWN = 30;       // seconds until the first zombie (roughly)
+    const ZOMBIE_STEP_MS = 600;   // zombies take a step this often
+    let COLS = 0;                 // how many squares across
+    let ROWS = 0;                 // how many squares up
+
+    // ----- THE BLOCK TYPES -----
+    const BLOCK_TYPES = [
+      { name: "Dirt",  color: "#8B5A2B" },
+      { name: "Grass", color: "#4CAF50" },
+      { name: "Stone", color: "#9E9E9E" },
+      { name: "Wood",  color: "#DEB887" },
+      { name: "Sand",  color: "#F0E68C" },
+      { name: "Water", color: "#4FC3F7" },
+      { name: "Lava",  color: "#FF5722" },
+      { name: "Rose",  color: "#E91E63" },
+      { name: "Snow",  color: "#FFFFFF" },
+      { name: "Coal",  color: "#37474F" }
+    ];
+    let currentBlock = 0;
+
+    // ----- THE WORLD -----
+    // IMPORTANT: in this game y = 0 is the BOTTOM row, and y counts UP.
+    // That way, when you zoom out with Ctrl+Minus, new squares appear
+    // at the TOP and the RIGHT - the ground stays put!
+    let player = { x: 7, y: 0, emoji: "🙂" };
+    let blocks = new Map();       // spot like "3,4" -> block type number
+    let zombies = [];             // each zombie is { x, y }
+
+    // ----- THE GAME STATE -----
+    let state = "playing";        // "playing", "won" or "lost"
+    let lives = START_LIVES;
+    let secondsLeft = GAME_SECONDS;
+    let spawnDelay = FIRST_SPAWN; // seconds between zombies (shrinks over time)
+    let spawnTimer = null;
+
+    // ----- DRAWING -----
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    // turn a world row (counted from the bottom) into screen pixels
+    function screenY(y) {
+      return canvas.height - (y + 1) * SIZE;
+    }
+
+    function draw() {
+      // wipe the screen clean
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // draw the grid lines (starting from the bottom!)
+      ctx.strokeStyle = "#ddd";
+      for (let col = 0; col <= COLS; col++) {
+        ctx.beginPath();
+        ctx.moveTo(col * SIZE, canvas.height - ROWS * SIZE);
+        ctx.lineTo(col * SIZE, canvas.height);
+        ctx.stroke();
+      }
+      for (let row = 0; row <= ROWS; row++) {
+        ctx.beginPath();
+        ctx.moveTo(0, canvas.height - row * SIZE);
+        ctx.lineTo(COLS * SIZE, canvas.height - row * SIZE);
+        ctx.stroke();
+      }
+
+      // draw every block in its own color
+      for (let [spot, blockType] of blocks) {
+        let [x, y] = spot.split(",").map(Number);
+        const type = BLOCK_TYPES[blockType];
+        if (!type) continue;
+        ctx.fillStyle = type.color;
+        ctx.fillRect(x * SIZE + 1, screenY(y) + 1, SIZE - 2, SIZE - 2);
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.3)";
+        ctx.strokeRect(x * SIZE + 1, screenY(y) + 1, SIZE - 2, SIZE - 2);
+      }
+
+      // draw everyone
+      ctx.font = "32px serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      for (let z of zombies) {
+        ctx.fillText("🧟", z.x * SIZE + SIZE / 2, screenY(z.y) + SIZE / 2);
+      }
+      ctx.fillText(player.emoji, player.x * SIZE + SIZE / 2, screenY(player.y) + SIZE / 2);
+
+      // if the game is over, say so in big letters
+      if (state === "lost") {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#FF5252";
+        ctx.font = "bold 70px sans-serif";
+        ctx.fillText("💀 GAME OVER 💀", canvas.width / 2, canvas.height / 2);
+      }
+    }
+
+    // ----- FILLING THE WHOLE WINDOW -----
+    function fillWindow() {
+      const topBar = document.getElementById("top-bar");
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight - topBar.offsetHeight;
+      COLS = Math.floor(canvas.width / SIZE);
+      ROWS = Math.floor(canvas.height / SIZE);
+
+      // if the window shrank, keep the player inside the world
+      if (player.x >= COLS) player.x = COLS - 1;
+      if (player.y >= ROWS) player.y = ROWS - 1;
+
+      draw();
+    }
+    window.addEventListener("resize", fillWindow);
+
+    // ----- HELPERS -----
+    function hasZombieAt(x, y) {
+      for (let z of zombies) {
+        if (z.x === x && z.y === y) return true;
+      }
+      return false;
+    }
+
+    function setMessage(text) {
+      document.getElementById("message").textContent = text;
+    }
+
+    function updateHud() {
+      document.getElementById("lives").textContent = "❤️".repeat(lives) + "🖤".repeat(START_LIVES - lives);
+      document.getElementById("zombie-count").textContent = zombies.length;
+      const minutes = Math.floor(secondsLeft / 60);
+      const seconds = secondsLeft % 60;
+      document.getElementById("clock").textContent = minutes + ":" + String(seconds).padStart(2, "0");
+    }
+
+    // ----- BUILDING OR BREAKING ONE SPOT -----
+    function buildOrBreak(spot) {
+      if (blocks.has(spot)) {
+        blocks.delete(spot);      // already a block there? break it
+      } else {
+        blocks.set(spot, currentBlock);
+      }
+    }
+
+    // ----- ZOMBIES -----
+    function spawnZombie() {
+      // try a few random columns along the TOP row until we find a free one
+      for (let tries = 0; tries < 20; tries++) {
+        const x = Math.floor(Math.random() * COLS);
+        const y = ROWS - 1;
+        if (blocks.has(x + "," + y) || hasZombieAt(x, y)) continue;
+        zombies.push({ x: x, y: y });
+        updateHud();
+        checkIfCaught();
+        draw();
+        return;
+      }
+    }
+
+    function scheduleNextZombie() {
+      // wait about spawnDelay seconds, but wobble it by up to 20%
+      const wobble = 0.8 + Math.random() * 0.4;
+      spawnTimer = setTimeout(function () {
+        if (state !== "playing") return;
+        spawnZombie();
+        spawnDelay = Math.max(5, spawnDelay - 1);   // each zombie comes a second sooner
+        scheduleNextZombie();
+      }, spawnDelay * wobble * 1000);
+    }
+
+    function moveOneZombie(z) {
+      // the four ways a zombie can shamble
+      const choices = [
+        { dx: 1,  dy: 0,  weight: 1 },
+        { dx: -1, dy: 0,  weight: 1 },
+        { dx: 0,  dy: 1,  weight: 1 },
+        { dx: 0,  dy: -1, weight: 1 }
+      ];
+
+      for (let c of choices) {
+        // zombies like moving towards the player...
+        if (c.dx !== 0 && c.dx === Math.sign(player.x - z.x)) c.weight += 2;
+        if (c.dy !== 0 && c.dy === Math.sign(player.y - z.y)) c.weight += 2;
+        // ...and they drift down a little
+        if (c.dy === -1) c.weight += 0.5;
+      }
+
+      // pick one choice at random, but heavier weights win more often
+      let total = 0;
+      for (let c of choices) total += c.weight;
+      let pick = Math.random() * total;
+      let chosen = choices[0];
+      for (let c of choices) {
+        pick = pick - c.weight;
+        if (pick <= 0) { chosen = c; break; }
+      }
+
+      const newX = z.x + chosen.dx;
+      const newY = z.y + chosen.dy;
+
+      // zombies stay in the world, and EVERY block stops them
+      if (newX < 0 || newX >= COLS || newY < 0 || newY >= ROWS) return;
+      if (blocks.has(newX + "," + newY)) return;
+      if (hasZombieAt(newX, newY)) return;
+
+      z.x = newX;
+      z.y = newY;
+    }
+
+    function moveAllZombies() {
+      if (state !== "playing") return;
+      for (let z of zombies) moveOneZombie(z);
+      checkIfCaught();
+      draw();
+    }
+
+    // ----- GETTING CAUGHT -----
+    function checkIfCaught() {
+      if (state !== "playing") return;
+      if (!hasZombieAt(player.x, player.y)) return;
+
+      lives = lives - 1;
+      updateHud();
+
+      if (lives <= 0) {
+        gameLost();
+      } else {
+        setMessage("A zombie got you! 😱");
+        setTimeout(function () { if (state === "playing") setMessage(""); }, 2000);
+        respawnPlayer();
+      }
+    }
+
+    function respawnPlayer() {
+      // pop up somewhere empty
+      for (let tries = 0; tries < 200; tries++) {
+        const x = Math.floor(Math.random() * COLS);
+        const y = Math.floor(Math.random() * ROWS);
+        if (blocks.has(x + "," + y) || hasZombieAt(x, y)) continue;
+        player.x = x;
+        player.y = y;
+        return;
+      }
+    }
+
+    // ----- WINNING AND LOSING -----
+    function gameLost() {
+      state = "lost";
+      clearTimeout(spawnTimer);
+      setMessage("The zombies won this time...");
+      document.getElementById("restart-btn").style.display = "inline-block";
+      draw();
+    }
+
+    function gameWon() {
+      state = "won";
+      clearTimeout(spawnTimer);
+      setMessage("🎉 YOU SURVIVED! 🎉");
+      document.getElementById("restart-btn").style.display = "inline-block";
+      startCelebration();
+    }
+
+    function restartGame() {
+      // your blocks stay, so you can make your fort even better!
+      zombies = [];
+      lives = START_LIVES;
+      secondsLeft = GAME_SECONDS;
+      spawnDelay = FIRST_SPAWN;
+      state = "playing";
+      stars = [];
+      setMessage("");
+      document.getElementById("restart-btn").style.display = "none";
+      updateHud();
+      scheduleNextZombie();
+      draw();
+    }
+    document.getElementById("restart-btn").addEventListener("click", restartGame);
+
+    // ----- THE CELEBRATION (exploding stars!) -----
+    let stars = [];
+    const STAR_COLORS = ["#FFD700", "#FF5252", "#40C4FF", "#69F0AE", "#E040FB", "#FFAB40"];
+
+    function explodeStars() {
+      // one big burst at a random spot
+      const x = Math.random() * canvas.width;
+      const y = Math.random() * canvas.height * 0.7;
+      const color = STAR_COLORS[Math.floor(Math.random() * STAR_COLORS.length)];
+      for (let i = 0; i < 35; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 2 + Math.random() * 4;
+        stars.push({
+          x: x,
+          y: y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 50 + Math.random() * 40,
+          color: color,
+          isEmoji: Math.random() < 0.15    // some sparks are real star emoji!
+        });
+      }
+    }
+
+    function celebrationFrame() {
+      if (state !== "won") return;
+
+      draw();
+
+      // sometimes add a new explosion
+      if (Math.random() < 0.06) explodeStars();
+
+      // move and draw every star
+      for (let s of stars) {
+        s.x = s.x + s.vx;
+        s.y = s.y + s.vy;
+        s.vy = s.vy + 0.05;       // a little gravity
+        s.life = s.life - 1;
+
+        if (s.isEmoji) {
+          ctx.font = "22px serif";
+          ctx.fillText("⭐", s.x, s.y);
+        } else {
+          ctx.fillStyle = s.color;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      // throw away stars that burned out
+      stars = stars.filter(function (s) { return s.life > 0; });
+
+      // the big winning words
+      ctx.fillStyle = "#FFD700";
+      ctx.strokeStyle = "black";
+      ctx.lineWidth = 3;
+      ctx.font = "bold 70px sans-serif";
+      ctx.textAlign = "center";
+      ctx.strokeText("🎉 YOU WIN! 🎉", canvas.width / 2, canvas.height / 2);
+      ctx.fillText("🎉 YOU WIN! 🎉", canvas.width / 2, canvas.height / 2);
+
+      requestAnimationFrame(celebrationFrame);
+    }
+
+    function startCelebration() {
+      explodeStars();
+      explodeStars();
+      requestAnimationFrame(celebrationFrame);
+    }
+
+    // ----- THE CLOCK -----
+    setInterval(function () {
+      if (state !== "playing") return;
+      secondsLeft = secondsLeft - 1;
+      updateHud();
+      if (secondsLeft <= 0) gameWon();
+    }, 1000);
+
+    // ----- KEYBOARD -----
+    let bHeld = false;            // is the B key held down right now?
+
+    document.addEventListener("keydown", function (event) {
+      const key = event.key;
+
+      if (key === "b" || key === "B") bHeld = true;
+
+      // number keys 1-9 and 0 pick a block type
+      const numbers = "1234567890";
+      if (numbers.includes(key)) pickBlock(numbers.indexOf(key));
+
+      // which way is the arrow pointing?
+      // remember: y counts UP from the bottom, so ArrowUp means y + 1
+      let dx = 0;
+      let dy = 0;
+      if (key === "ArrowUp")    dy = 1;
+      if (key === "ArrowDown")  dy = -1;
+      if (key === "ArrowLeft")  dx = -1;
+      if (key === "ArrowRight") dx = 1;
+      if (dx === 0 && dy === 0) return;   // not an arrow key
+
+      event.preventDefault();             // stop the page from scrolling
+      if (state !== "playing") return;    // no moving after the game ends
+
+      const newX = player.x + dx;
+      const newY = player.y + dy;
+
+      // stay inside the world
+      if (newX < 0 || newX >= COLS || newY < 0 || newY >= ROWS) return;
+
+      const spot = newX + "," + newY;
+
+      if (bHeld) {
+        // B + arrow: build (or break) the block next to the player
+        buildOrBreak(spot);
+      } else {
+        // just an arrow: walk (but not through blocks!)
+        if (blocks.has(spot)) return;
+        player.x = newX;
+        player.y = newY;
+        checkIfCaught();     // walking into a zombie hurts too!
+      }
+      draw();
+    });
+
+    document.addEventListener("keyup", function (event) {
+      if (event.key === "b" || event.key === "B") bHeld = false;
+    });
+
+    // ----- CLICKING -----
+    canvas.addEventListener("click", function (event) {
+      if (state !== "playing") return;
+
+      // figure out which square was clicked (y counted from the bottom!)
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.floor((event.clientX - rect.left) / SIZE);
+      const y = Math.floor((canvas.height - (event.clientY - rect.top)) / SIZE);
+
+      // ignore clicks outside the world or on the player
+      if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return;
+      if (x === player.x && y === player.y) return;
+
+      buildOrBreak(x + "," + y);
+      draw();
+    });
+
+    // ----- PICKING YOUR CHARACTER -----
+    for (let button of document.querySelectorAll(".emoji-button")) {
+      button.addEventListener("click", function () {
+        document.querySelector(".emoji-button.picked").classList.remove("picked");
+        button.classList.add("picked");
+        player.emoji = button.textContent;
+        draw();
+      });
+    }
+
+    // ----- PICKING A BLOCK TYPE -----
+    const hotbar = document.getElementById("hotbar");
+    for (let i = 0; i < BLOCK_TYPES.length; i++) {
+      const button = document.createElement("button");
+      button.className = "block-button";
+      button.style.background = BLOCK_TYPES[i].color;
+      button.textContent = (i + 1) % 10;   // show the key: 1, 2, ... 9, 0
+      button.title = BLOCK_TYPES[i].name;
+      button.addEventListener("click", function () { pickBlock(i); });
+      hotbar.appendChild(button);
+    }
+
+    function pickBlock(i) {
+      currentBlock = i;
+      const buttons = document.querySelectorAll(".block-button");
+      for (let j = 0; j < buttons.length; j++) {
+        if (j === i) {
+          buttons[j].classList.add("picked");
+        } else {
+          buttons[j].classList.remove("picked");
+        }
+      }
+    }
+
+    // ----- ZOMBIE HEARTBEAT -----
+    setInterval(moveAllZombies, ZOMBIE_STEP_MS);
+
+    // get everything ready!
+    pickBlock(0);
+    updateHud();
+    fillWindow();
+    scheduleNextZombie();
+  </script>
+
+</body>
+</html>
