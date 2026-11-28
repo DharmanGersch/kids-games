@@ -2,6 +2,7 @@
 <html>
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Zombie Defense</title>
   <style>
     html, body {
@@ -76,6 +77,36 @@
       display: block;
       background: white;
       cursor: pointer;
+      touch-action: none;   /* fingers control the game, not the page */
+    }
+
+    /* The on-screen arrow pad (great for tablets and phones) */
+    #dpad {
+      position: fixed;
+      right: 15px;
+      bottom: 15px;
+      display: grid;
+      grid-template-columns: 52px 52px 52px;
+      grid-template-rows: 52px 52px 52px;
+      gap: 4px;
+      opacity: 0.85;
+    }
+
+    #dpad button {
+      font-size: 26px;
+      border: 2px solid #555;
+      border-radius: 10px;
+      background: white;
+      cursor: pointer;
+      touch-action: manipulation;   /* no double-tap zoom on the buttons */
+      user-select: none;
+    }
+
+    /* the build toggle glows orange when it's on */
+    #pad-build.picked {
+      border: 3px solid orange;
+      box-shadow: 0 0 6px orange;
+      background: #FFF3C4;
     }
   </style>
 </head>
@@ -83,7 +114,7 @@
 
   <div id="top-bar">
     <b>Zombie Defense</b> &mdash;
-    arrows = walk &nbsp;|&nbsp; B + arrow = build or break &nbsp;|&nbsp; 1 to 0 = pick a block
+    drag or arrows = walk &nbsp;|&nbsp; B + arrow (or 🧱 + pad) = build or break &nbsp;|&nbsp; 1 to 0 = pick a block &nbsp;|&nbsp; tap a zombie to bop it!
     <br>
     Character:
     <button class="emoji-button picked">🙂</button>
@@ -105,6 +136,19 @@
 
   <canvas id="game"></canvas>
 
+  <!-- on-screen arrows, laid out like a plus sign -->
+  <div id="dpad">
+    <span></span>
+    <button id="pad-up">⬆️</button>
+    <span></span>
+    <button id="pad-left">⬅️</button>
+    <button id="pad-build" title="Build mode">🧱</button>
+    <button id="pad-right">➡️</button>
+    <span></span>
+    <button id="pad-down">⬇️</button>
+    <span></span>
+  </div>
+
   <script>
     // ----- SETTINGS -----
     const SIZE = 40;              // each square is 40 pixels big
@@ -112,6 +156,10 @@
     const GAME_SECONDS = 5 * 60;  // survive this long to win (5 minutes)
     const FIRST_SPAWN = 30;       // seconds until the first zombie (roughly)
     const ZOMBIE_STEP_MS = 600;   // zombies take a step this often
+    const ZOMBIE_LIVES = 3;       // how many bops it takes to pop a zombie
+    const BLOCK_STRENGTH = 10;    // how many zombie bumps a block survives
+    const LAVA = 6;               // which block number is Lava (it's special!)
+    const SLIDE_SPEED = 0.25;     // how fast everyone glides between squares (0 to 1)
     let COLS = 0;                 // how many squares across
     let ROWS = 0;                 // how many squares up
 
@@ -134,9 +182,12 @@
     // IMPORTANT: in this game y = 0 is the BOTTOM row, and y counts UP.
     // That way, when you zoom out with Ctrl+Minus, new squares appear
     // at the TOP and the RIGHT - the ground stays put!
-    let player = { x: 7, y: 0, emoji: "🙂" };
+    // Everyone has a real spot (x, y) on the grid, and a drawing spot
+    // (drawX, drawY) that glides smoothly towards it every frame.
+    let player = { x: 7, y: 0, drawX: 7, drawY: 0, emoji: "🙂" };
     let blocks = new Map();       // spot like "3,4" -> block type number
-    let zombies = [];             // each zombie is { x, y }
+    let blockDamage = new Map();  // spot -> how many times zombies bumped it
+    let zombies = [];             // each zombie is { x, y, drawX, drawY, lives }
 
     // ----- THE GAME STATE -----
     let state = "playing";        // "playing", "won" or "lost"
@@ -182,16 +233,24 @@
         ctx.fillRect(x * SIZE + 1, screenY(y) + 1, SIZE - 2, SIZE - 2);
         ctx.strokeStyle = "rgba(0, 0, 0, 0.3)";
         ctx.strokeRect(x * SIZE + 1, screenY(y) + 1, SIZE - 2, SIZE - 2);
+
+        // show cracks if zombies have been bumping this block
+        const damage = blockDamage.get(spot) || 0;
+        if (damage > 0) drawCracks(x, y, damage);
       }
 
-      // draw everyone
+      // draw everyone (at their smooth gliding spots!)
       ctx.font = "32px serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       for (let z of zombies) {
-        ctx.fillText("🧟", z.x * SIZE + SIZE / 2, screenY(z.y) + SIZE / 2);
+        ctx.fillText("🧟", z.drawX * SIZE + SIZE / 2, screenY(z.drawY) + SIZE / 2);
+        // little green hearts show the zombie's lives
+        ctx.font = "9px serif";
+        ctx.fillText("💚".repeat(z.lives), z.drawX * SIZE + SIZE / 2, screenY(z.drawY) + 5);
+        ctx.font = "32px serif";
       }
-      ctx.fillText(player.emoji, player.x * SIZE + SIZE / 2, screenY(player.y) + SIZE / 2);
+      ctx.fillText(player.emoji, player.drawX * SIZE + SIZE / 2, screenY(player.drawY) + SIZE / 2);
 
       // if the game is over, say so in big letters
       if (state === "lost") {
@@ -201,6 +260,49 @@
         ctx.font = "bold 70px sans-serif";
         ctx.fillText("💀 GAME OVER 💀", canvas.width / 2, canvas.height / 2);
       }
+    }
+
+    // ----- CRACKS ON DAMAGED BLOCKS -----
+    function drawCracks(x, y, damage) {
+      const midX = x * SIZE + SIZE / 2;
+      const midY = screenY(y) + SIZE / 2;
+
+      // the more damage, the darker the block gets
+      ctx.fillStyle = "rgba(0, 0, 0, " + (damage / BLOCK_STRENGTH) * 0.4 + ")";
+      ctx.fillRect(x * SIZE + 1, screenY(y) + 1, SIZE - 2, SIZE - 2);
+
+      // cracks spread out from the middle, one per bump
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+      ctx.beginPath();
+      for (let i = 0; i < damage; i++) {
+        const angle = i * 2.4;    // spins each new crack to a new direction
+        ctx.moveTo(midX, midY);
+        ctx.lineTo(midX + Math.cos(angle) * SIZE * 0.45,
+                   midY + Math.sin(angle) * SIZE * 0.45);
+      }
+      ctx.stroke();
+    }
+
+    // ----- SMOOTH GLIDING -----
+    // every frame, drawing spots slide a little closer to the real spots
+    function slide(current, target) {
+      const diff = target - current;
+      if (Math.abs(diff) < 0.01) return target;   // close enough - snap on
+      return current + diff * SLIDE_SPEED;
+    }
+
+    function gameFrame() {
+      player.drawX = slide(player.drawX, player.x);
+      player.drawY = slide(player.drawY, player.y);
+      for (let z of zombies) {
+        z.drawX = slide(z.drawX, z.x);
+        z.drawY = slide(z.drawY, z.y);
+      }
+
+      draw();
+      if (state === "won") drawCelebration();
+
+      requestAnimationFrame(gameFrame);   // and again next frame, forever
     }
 
     // ----- FILLING THE WHOLE WINDOW -----
@@ -246,6 +348,7 @@
       } else {
         blocks.set(spot, currentBlock);
       }
+      blockDamage.delete(spot);   // new or gone - either way, no cracks
     }
 
     // ----- ZOMBIES -----
@@ -255,12 +358,18 @@
         const x = Math.floor(Math.random() * COLS);
         const y = ROWS - 1;
         if (blocks.has(x + "," + y) || hasZombieAt(x, y)) continue;
-        zombies.push({ x: x, y: y });
-        updateHud();
-        checkIfCaught();
-        draw();
+        // drawY starts one row higher, so new zombies slide down into view
+        zombies.push({ x: x, y: y, drawX: x, drawY: y + 1, lives: ZOMBIE_LIVES });
         return;
       }
+    }
+
+    function spawnWave() {
+      // each wave DOUBLES the zombies: 1, then 2, then 4, then 8...
+      const howMany = Math.max(1, zombies.length);
+      for (let i = 0; i < howMany; i++) spawnZombie();
+      updateHud();
+      checkIfCaught();
     }
 
     function scheduleNextZombie() {
@@ -268,8 +377,8 @@
       const wobble = 0.8 + Math.random() * 0.4;
       spawnTimer = setTimeout(function () {
         if (state !== "playing") return;
-        spawnZombie();
-        spawnDelay = Math.max(5, spawnDelay - 1);   // each zombie comes a second sooner
+        spawnWave();
+        spawnDelay = Math.max(5, spawnDelay - 1);   // each wave comes a second sooner
         scheduleNextZombie();
       }, spawnDelay * wobble * 1000);
     }
@@ -303,10 +412,28 @@
 
       const newX = z.x + chosen.dx;
       const newY = z.y + chosen.dy;
+      const spot = newX + "," + newY;
 
-      // zombies stay in the world, and EVERY block stops them
+      // zombies stay in the world
       if (newX < 0 || newX >= COLS || newY < 0 || newY >= ROWS) return;
-      if (blocks.has(newX + "," + newY)) return;
+
+      // EVERY block stops them - but blocks pay a price...
+      if (blocks.has(spot)) {
+        if (blocks.get(spot) === LAVA) {
+          z.lives = 0;            // sizzle! lava melts zombies instantly
+          return;                 // (and lava itself is never damaged)
+        }
+        // the zombie bumps the block and cracks it a little
+        const damage = (blockDamage.get(spot) || 0) + 1;
+        if (damage >= BLOCK_STRENGTH) {
+          blocks.delete(spot);    // too many bumps - the block breaks!
+          blockDamage.delete(spot);
+        } else {
+          blockDamage.set(spot, damage);
+        }
+        return;
+      }
+
       if (hasZombieAt(newX, newY)) return;
 
       z.x = newX;
@@ -316,8 +443,10 @@
     function moveAllZombies() {
       if (state !== "playing") return;
       for (let z of zombies) moveOneZombie(z);
+      // carry away the zombies that melted in lava
+      zombies = zombies.filter(function (z) { return z.lives > 0; });
       checkIfCaught();
-      draw();
+      updateHud();
     }
 
     // ----- GETTING CAUGHT -----
@@ -345,6 +474,9 @@
         if (blocks.has(x + "," + y) || hasZombieAt(x, y)) continue;
         player.x = x;
         player.y = y;
+        // respawning teleports - no sliding across the whole screen
+        player.drawX = x;
+        player.drawY = y;
         return;
       }
     }
@@ -355,7 +487,6 @@
       clearTimeout(spawnTimer);
       setMessage("The zombies won this time...");
       document.getElementById("restart-btn").style.display = "inline-block";
-      draw();
     }
 
     function gameWon() {
@@ -363,22 +494,28 @@
       clearTimeout(spawnTimer);
       setMessage("🎉 YOU SURVIVED! 🎉");
       document.getElementById("restart-btn").style.display = "inline-block";
-      startCelebration();
+      explodeStars();
+      explodeStars();
     }
 
     function restartGame() {
-      // your blocks stay, so you can make your fort even better!
+      // a fresh empty world each round - build your fort again!
+      blocks.clear();
+      blockDamage.clear();
       zombies = [];
       lives = START_LIVES;
       secondsLeft = GAME_SECONDS;
       spawnDelay = FIRST_SPAWN;
       state = "playing";
       stars = [];
+      player.x = Math.min(7, COLS - 1);
+      player.y = 0;
+      player.drawX = player.x;
+      player.drawY = player.y;
       setMessage("");
       document.getElementById("restart-btn").style.display = "none";
       updateHud();
       scheduleNextZombie();
-      draw();
     }
     document.getElementById("restart-btn").addEventListener("click", restartGame);
 
@@ -406,11 +543,7 @@
       }
     }
 
-    function celebrationFrame() {
-      if (state !== "won") return;
-
-      draw();
-
+    function drawCelebration() {
       // sometimes add a new explosion
       if (Math.random() < 0.06) explodeStars();
 
@@ -442,14 +575,6 @@
       ctx.textAlign = "center";
       ctx.strokeText("🎉 YOU WIN! 🎉", canvas.width / 2, canvas.height / 2);
       ctx.fillText("🎉 YOU WIN! 🎉", canvas.width / 2, canvas.height / 2);
-
-      requestAnimationFrame(celebrationFrame);
-    }
-
-    function startCelebration() {
-      explodeStars();
-      explodeStars();
-      requestAnimationFrame(celebrationFrame);
     }
 
     // ----- THE CLOCK -----
@@ -459,6 +584,32 @@
       updateHud();
       if (secondsLeft <= 0) gameWon();
     }, 1000);
+
+    // ----- ONE MOVE (shared by keyboard, drag and the arrow pad) -----
+    // dx/dy point at the square next to the player.
+    // build = true means build/break there instead of walking.
+    function doAction(dx, dy, build) {
+      if (state !== "playing") return;
+
+      const newX = player.x + dx;
+      const newY = player.y + dy;
+
+      // stay inside the world
+      if (newX < 0 || newX >= COLS || newY < 0 || newY >= ROWS) return;
+
+      const spot = newX + "," + newY;
+
+      if (build) {
+        buildOrBreak(spot);
+      } else {
+        // walk (but not through blocks - even lava
+        // never hurts the player, it only blocks the way)
+        if (blocks.has(spot)) return;
+        player.x = newX;
+        player.y = newY;
+        checkIfCaught();     // walking into a zombie hurts too!
+      }
+    }
 
     // ----- KEYBOARD -----
     let bHeld = false;            // is the B key held down right now?
@@ -483,48 +634,124 @@
       if (dx === 0 && dy === 0) return;   // not an arrow key
 
       event.preventDefault();             // stop the page from scrolling
-      if (state !== "playing") return;    // no moving after the game ends
-
-      const newX = player.x + dx;
-      const newY = player.y + dy;
-
-      // stay inside the world
-      if (newX < 0 || newX >= COLS || newY < 0 || newY >= ROWS) return;
-
-      const spot = newX + "," + newY;
-
-      if (bHeld) {
-        // B + arrow: build (or break) the block next to the player
-        buildOrBreak(spot);
-      } else {
-        // just an arrow: walk (but not through blocks!)
-        if (blocks.has(spot)) return;
-        player.x = newX;
-        player.y = newY;
-        checkIfCaught();     // walking into a zombie hurts too!
-      }
-      draw();
+      doAction(dx, dy, bHeld);
     });
 
     document.addEventListener("keyup", function (event) {
       if (event.key === "b" || event.key === "B") bHeld = false;
     });
 
-    // ----- CLICKING -----
+    // ----- THE ARROW PAD (for tablets and phones) -----
+    let padBuild = false;         // is the 🧱 build toggle switched on?
+
+    document.getElementById("pad-build").addEventListener("click", function () {
+      padBuild = !padBuild;
+      this.classList.toggle("picked", padBuild);
+    });
+
+    function wirePadButton(id, dx, dy) {
+      document.getElementById(id).addEventListener("pointerdown", function (event) {
+        event.preventDefault();   // taps shouldn't zoom or select text
+        doAction(dx, dy, padBuild);
+      });
+    }
+    wirePadButton("pad-up", 0, 1);
+    wirePadButton("pad-down", 0, -1);
+    wirePadButton("pad-left", -1, 0);
+    wirePadButton("pad-right", 1, 0);
+
+    // ----- CLICKING AND DRAGGING -----
+    // which square is the mouse or finger on?
+    function cellFromEvent(event) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: Math.floor((event.clientX - rect.left) / SIZE),
+        y: Math.floor((canvas.height - (event.clientY - rect.top)) / SIZE)
+      };
+    }
+
+    // grab the player and pull them around!
+    let dragging = false;
+    let justDragged = false;      // so letting go doesn't also build a block
+
+    canvas.addEventListener("pointerdown", function (event) {
+      const cell = cellFromEvent(event);
+      if (cell.x === player.x && cell.y === player.y) {
+        dragging = true;
+        // keep following the finger even if it slips off the canvas
+        if (canvas.hasPointerCapture && event.pointerId >= 0) {
+          try { canvas.setPointerCapture(event.pointerId); } catch (e) { /* fine without it */ }
+        }
+      }
+    });
+
+    canvas.addEventListener("pointermove", function (event) {
+      if (!dragging || state !== "playing") return;
+      const cell = cellFromEvent(event);
+      stepTowards(cell.x, cell.y);
+    });
+
+    canvas.addEventListener("pointerup", function () {
+      if (!dragging) return;
+      dragging = false;
+      justDragged = true;
+      setTimeout(function () { justDragged = false; }, 150);
+    });
+
+    // take ONE step towards where the finger is - walls still count!
+    function stepTowards(tx, ty) {
+      if (tx === player.x && ty === player.y) return;
+      const dx = Math.sign(tx - player.x);
+      const dy = Math.sign(ty - player.y);
+
+      // try the longer direction first, then the other one
+      let tryOrder;
+      if (Math.abs(tx - player.x) >= Math.abs(ty - player.y)) {
+        tryOrder = [[dx, 0], [0, dy]];
+      } else {
+        tryOrder = [[0, dy], [dx, 0]];
+      }
+
+      for (let [mx, my] of tryOrder) {
+        if (mx === 0 && my === 0) continue;
+        const nx = player.x + mx;
+        const ny = player.y + my;
+        if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) continue;
+        if (blocks.has(nx + "," + ny)) continue;
+        player.x = nx;
+        player.y = ny;
+        checkIfCaught();
+        return;
+      }
+    }
+
     canvas.addEventListener("click", function (event) {
       if (state !== "playing") return;
+      if (justDragged) return;    // that click was the end of a drag
 
-      // figure out which square was clicked (y counted from the bottom!)
-      const rect = canvas.getBoundingClientRect();
-      const x = Math.floor((event.clientX - rect.left) / SIZE);
-      const y = Math.floor((canvas.height - (event.clientY - rect.top)) / SIZE);
+      const cell = cellFromEvent(event);
+      const x = cell.x;
+      const y = cell.y;
 
       // ignore clicks outside the world or on the player
       if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return;
       if (x === player.x && y === player.y) return;
 
+      // did we click a zombie? bop it!
+      for (let z of zombies) {
+        if (z.x === x && z.y === y) {
+          z.lives = z.lives - 1;
+          if (z.lives <= 0) {
+            zombies = zombies.filter(function (other) { return other.lives > 0; });
+            setMessage("Zombie bopped! 💥");
+            setTimeout(function () { if (state === "playing") setMessage(""); }, 1500);
+          }
+          updateHud();
+          return;            // clicking a zombie never builds a block
+        }
+      }
+
       buildOrBreak(x + "," + y);
-      draw();
     });
 
     // ----- PICKING YOUR CHARACTER -----
@@ -533,7 +760,6 @@
         document.querySelector(".emoji-button.picked").classList.remove("picked");
         button.classList.add("picked");
         player.emoji = button.textContent;
-        draw();
       });
     }
 
@@ -569,6 +795,7 @@
     updateHud();
     fillWindow();
     scheduleNextZombie();
+    gameFrame();              // start the smooth drawing loop
   </script>
 
 </body>
